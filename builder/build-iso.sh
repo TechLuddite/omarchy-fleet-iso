@@ -23,6 +23,23 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# Every Omarchy package that ships in the offline mirror, as one list in build
+# order. The three above keep their own variables because each has a distinct
+# role, and this list is what the rest of the build iterates over: what
+# --local-source builds, what is withheld from the online download, and what is
+# added back to the keep-set before pruning. OMARCHY_EXTRA_PACKAGES appends
+# space-separated names, so a build that ships a further Omarchy package needs
+# no edit here; with --local-source each one needs a recipe in the pkgs
+# checkout, and build-omarchy-packages.sh says so by name when it does not.
+read -r -a omarchy_extra_packages <<<"${OMARCHY_EXTRA_PACKAGES:-}"
+omarchy_packages=(
+  "$OMARCHY_SETTINGS_PACKAGE"
+  "$OMARCHY_RUNTIME_PACKAGE"
+  "$OMARCHY_NVIM_PACKAGE"
+  "${omarchy_extra_packages[@]}"
+)
+export OMARCHY_PACKAGES="${omarchy_packages[*]}"
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 pacman --noconfirm -Sy archlinux-keyring
@@ -196,7 +213,7 @@ mapfile -t all_packages < <(
     grep -hv '^#\|^$' /builder/archinstall.packages
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.
-    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
+    printf '%s\n' "${omarchy_packages[@]}"
   } | sort -u
 )
 
@@ -214,12 +231,13 @@ mapfile -t all_packages < <(
 # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
 # the published versions on top.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+  local_package_filters=()
+  for local_package_name in "${omarchy_packages[@]}"; do
+    local_package_filters+=(-e "$local_package_name")
+  done
   mapfile -t all_packages < <(
     printf '%s\n' "${all_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+      grep -Fxv "${local_package_filters[@]}" || true
   )
 fi
 
@@ -255,8 +273,7 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # checkouts. Add those exact artifacts back to the keep-set after verifying
 # that the local build left exactly one file for each selected package name.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${omarchy_packages[@]}"; do
     local_package_file=""
     for candidate in "$offline_mirror_dir/$local_package_name-"*.pkg.tar.*; do
       [[ -f $candidate && $candidate != *.sig ]] || continue
@@ -314,8 +331,7 @@ resolve_expected_packages() {
       # install time, not the build-time source it came from.
       grep -hv '^#\|^$' \
         "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
-      printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" \
-        "$OMARCHY_NVIM_PACKAGE"
+      printf '%s\n' "${omarchy_packages[@]}"
     } | sort -u
   )
 
