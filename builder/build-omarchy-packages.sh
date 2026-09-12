@@ -36,11 +36,18 @@ pacman -Sy --noconfirm
 : "${OMARCHY_SETTINGS_PACKAGE:=omarchy-settings-dev}"
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 
-packages=(
-  "$OMARCHY_SETTINGS_PACKAGE"
-  "$OMARCHY_RUNTIME_PACKAGE"
-  "$OMARCHY_NVIM_PACKAGE"
-)
+# build-iso.sh publishes the whole list, in build order, so the set built here
+# and the set the ISO expects in the offline mirror cannot drift apart. The
+# fallback keeps this script usable on its own.
+if [[ -n ${OMARCHY_PACKAGES:-} ]]; then
+  read -r -a packages <<<"$OMARCHY_PACKAGES"
+else
+  packages=(
+    "$OMARCHY_SETTINGS_PACKAGE"
+    "$OMARCHY_RUNTIME_PACKAGE"
+    "$OMARCHY_NVIM_PACKAGE"
+  )
+fi
 
 # Local-source packages must replace every cached build of the same package,
 # even when the checkout's generated pkgver sorts below a published build.
