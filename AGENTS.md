@@ -18,6 +18,20 @@ git push origin upstream/quattro:quattro
 
 The runtime repository is the sibling checkout `../omarchy-fleet`, mirroring `omacom/omarchy`. Its `agents/skills/fleet.md` carries the fleet design and is worth reading before changing anything here.
 
+## Signed commits
+
+Sign every commit this fork adds to `fleet-main`. The signature has to verify on GitHub. What this fork produces is meant to run as root on machines that enrol, so who wrote a change must be checkable from the history alone.
+
+Commit with signing as the maintainer's git configuration already sets it up. If a commit fails to sign, stop and report the error. Never work around it with `--no-gpg-sign`, `-c commit.gpgsign=false` or a change to git configuration.
+
+Check before pushing. A signed commit shows a signature line and an unsigned one shows none:
+
+```bash
+git log --show-signature -1
+```
+
+Upstream's history is partly unsigned, which is expected. Fast-forwarding `quattro` creates no commits, so it needs no signature. Bringing new upstream commits into `fleet-main` is different. Once the branch requires signatures, GitHub blocks a pull request carrying unsigned commits whichever merge method is used, and only someone allowed to bypass the protection can merge it. That includes merging a clean branch cut from a newer `quattro` than `fleet-main` has already absorbed. That merge is the maintainer's call. Do not attempt it from a feature branch.
+
 ## What this fork has changed
 
 One thing so far. `builder/build-iso.sh` used to name the three Omarchy packages separately in four places: the target list, the filter that withholds locally built packages from the online download, the keep-set that adds them back before pruning, and the expected-package count. Shipping a fourth package meant editing all four and keeping them in step, and missing the filter sends the new name to `pacman -Syw` against a mirror that does not carry it, which fails the build with a target-not-found error that does not explain itself.
