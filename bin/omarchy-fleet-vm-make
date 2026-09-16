@@ -184,9 +184,16 @@ VNC_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-8)
 # firmware falls through to the installer now, and boots the installed system
 # once there is one. No need to eject the ISO afterwards.
 #
-# The guest agent channel is worth the one line. Without it `virsh domifaddr`
-# cannot answer and finding a machine's address means reading DHCP leases and
-# matching them against the domain's MAC by hand.
+# The guest agent channel is the host half of a conversation the guest does not
+# hold up. `qemu-guest-agent` is in the ISO's offline mirror for the live
+# environment and is NOT installed into the target, so on a fresh machine
+# `virsh domifaddr --source agent` answers "guest agent is not connected" and
+# always will. The channel costs one line and starts working the day something
+# installs the agent, which nothing here does on purpose: a bench machine that
+# differs from a real install is worth less for verifying anything.
+#
+# Until then, find a machine by matching its MAC against the DHCP leases, which
+# is what the closing hint prints.
 sudo virt-install \
   --name "$VM" \
   --memory "$RAM_MIB" --vcpus "$VCPUS" --cpu host-passthrough \
@@ -215,7 +222,9 @@ title=$VM
 fullscreen=0
 EOF
 
+MAC=$(sudo virsh dumpxml "$VM" | grep -oP "mac address='\K[^']+")
+
 echo "$VM installing from $(basename "$ISO"). Roughly ten minutes from cold."
-echo "  watch:  sudo virsh domifaddr $VM --source agent"
+echo "  address: sudo virsh net-dhcp-leases default | grep $MAC"
 echo "  view:   bin/omarchy-fleet-vm-view $N"
 echo "  log in: $GUEST_USER / $GUEST_PASSWORD"
