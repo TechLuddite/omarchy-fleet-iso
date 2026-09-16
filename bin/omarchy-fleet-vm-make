@@ -1,0 +1,221 @@
+#!/bin/bash
+#
+# Build a persistent, unattended Omarchy virtual machine from a locally built
+# ISO, as a libvirt domain you can keep, reboot, factory reset and watch.
+#
+#   bin/omarchy-fleet-vm-make 1 [release/omarchy.iso]
+#
+# This is bench tooling, not a test runner, and the distinction is the reason it
+# exists alongside what is already here.
+#
+#   omarchy-iso-boot   boots an ISO in a throwaway QEMU process for a look.
+#   omarchy-iso-test   drives the real interactive install through OCR and
+#                      keystrokes and runs the acceptance suite.
+#   test/integration   installs once through cidata and boots throwaway
+#                      overlays of that base image for each scenario.
+#
+# None of those leaves a machine behind. Verifying that a menu entry appears
+# only on an enrolled machine, or that a factory reset does what it claims,
+# needs two machines that persist across reboots and can be looked at side by
+# side. That is what this builds.
+#
+# The Omarchy ISO looks for a drive labelled `cidata` (the cloud-init NoCloud
+# label, so Proxmox, libvirt and Packer all know how to attach one) and, finding
+# one, skips its interactive configurator and installs from the files on it. See
+# `configs/airootfs/usr/local/bin/omarchy-cidata-load`. We build that drive here
+# with exactly the files the wizard would otherwise have written, so the install
+# runs the ordinary code path against ordinary inputs.
+#
+# KEEP IN STEP: `build_cidata` in `test/integration.d/base-test.sh` writes the
+# same drive for the integration harness and is the copy to follow. The two
+# duplicate the partition arithmetic on purpose, because that function is welded
+# to the harness it lives in and cannot be sourced from outside it. If one
+# changes, change the other.
+#
+# Destroys and recreates the named machine. It is a test machine; that is the point.
+
+set -euo pipefail
+
+N=${1:?usage: omarchy-fleet-vm-make <number> [iso]}
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ISO=${2:-$(\ls -t "$ROOT"/release/*.iso 2>/dev/null | head -n1)}
+VM="omarchy-fleet-test$N"
+
+# Matches GUEST_USER and GUEST_PASSWORD in the integration harness, so a machine
+# from either route is reached the same way.
+GUEST_USER=${OMARCHY_FLEET_VM_USER:-omarchy}
+GUEST_PASSWORD=${OMARCHY_FLEET_VM_PASSWORD:-omarchy}
+PUBKEY_FILE=${OMARCHY_FLEET_VM_PUBKEY:-$HOME/.ssh/id_ed25519.pub}
+
+DISK_GIB=${OMARCHY_FLEET_VM_DISK_GIB:-60}
+RAM_MIB=${OMARCHY_FLEET_VM_RAM_MIB:-4096}
+VCPUS=${OMARCHY_FLEET_VM_VCPUS:-4}
+POOL=${OMARCHY_FLEET_VM_POOL:-/var/lib/libvirt/images}
+CONF_DIR="$HOME/.local/share/omarchy-fleet-vm"
+
+# 5911 and up, chosen to stay clear of the 5900 block a desktop hands out by
+# default, so a bench machine never collides with an ad hoc VM.
+VNC_PORT=$((5910 + N))
+
+# An ISO built with --local-source sets OMARCHY_ISO_REF=local, and
+# builder/build-iso.sh maps the local, dev and edge refs to the -dev package
+# names. The ISO exports those into the configurator's environment, so an
+# interactive install gets them right on its own. An autoinstall drive skips the
+# configurator and carries its own package list, so it has to agree by hand.
+# Naming `omarchy` against a local-source ISO fails late inside archinstall with
+# a target-not-found against an offline mirror that has no such package.
+RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-omarchy-dev}
+SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings-dev}
+
+[[ -n $ISO && -f $ISO ]] || { echo "no ISO found; build one with bin/omarchy-iso-make" >&2; exit 1; }
+[[ -f $PUBKEY_FILE ]]    || { echo "no public key at $PUBKEY_FILE" >&2; exit 1; }
+
+# Partition geometry. These are BYTES, and they mirror the arithmetic in the
+# configurator: 1 MiB gap, a 2 GiB ESP, the rest btrfs, 1 MiB left at the end for
+# the GPT backup header. Getting this wrong produces an install that fails late,
+# inside archinstall, with an error that does not explain itself.
+MIB=$((1024 * 1024)); GIB=$((MIB * 1024))
+DISK_BYTES=$((DISK_GIB * GIB))
+BOOT_START=$MIB
+BOOT_SIZE=$((2 * GIB))
+MAIN_START=$((BOOT_SIZE + BOOT_START))
+MAIN_SIZE=$((DISK_BYTES - MAIN_START - MIB))
+
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+SEED=$WORK/seed; mkdir -p "$SEED"
+
+HASH=$(printf '%s' "$GUEST_PASSWORD" | openssl passwd -6 -stdin)
+
+printf 'Omarchy Test\n'    >"$SEED/user_full_name.txt"
+printf 'test@omarchy.org\n' >"$SEED/user_email_address.txt"
+printf 'false\n'           >"$SEED/user_encrypt_installation.txt"
+cat "$PUBKEY_FILE"         >"$SEED/authorized_keys"
+
+jq -n --arg h "$HASH" --arg u "$GUEST_USER" '{
+  root_enc_password: $h,
+  users: [ { enc_password: $h, groups: [], sudo: true, username: $u } ]
+}' >"$SEED/user_credentials.json"
+
+jq -n --arg host "$VM" --arg dev /dev/vda \
+      --arg tz "$(timedatectl show -p Timezone --value)" \
+      --arg runtime "$RUNTIME_PACKAGE" --arg settings "$SETTINGS_PACKAGE" \
+      --argjson bs "$BOOT_START" --argjson bz "$BOOT_SIZE" \
+      --argjson ms "$MAIN_START" --argjson mz "$MAIN_SIZE" '
+{
+  "app_config": null, "archinstall-language": "English", "auth_config": {},
+  "audio_config": { "audio": "pipewire" },
+  "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+  "custom_commands": [],
+  "omarchy_install": {
+    "mode": "full_disk", "defer_provisioning": false, "target_mount": "/mnt",
+    "boot": { "esp_mount": "/boot", "esp_path": "/EFI/limine",
+              "efi_binary": "limine_x64.efi", "enable_fallback": true },
+    "storage": { "kernel": "linux" }
+  },
+  "disk_config": {
+    "config_type": "default_layout",
+    "device_modifications": [ {
+      "device": $dev, "wipe": true,
+      "partitions": [
+        { "btrfs": [], "dev_path": null, "flags": ["boot","esp"], "fs_type": "fat32",
+          "mount_options": [], "mountpoint": "/boot",
+          "obj_id": "ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d",
+          "size":  { "sector_size": {"unit":"B","value":512}, "unit":"B", "value": $bz },
+          "start": { "sector_size": {"unit":"B","value":512}, "unit":"B", "value": $bs },
+          "status": "create", "type": "primary" },
+        { "btrfs": [ {"mountpoint":"/","name":"@"}, {"mountpoint":"/home","name":"@home"},
+                     {"mountpoint":"/var/log","name":"@log"},
+                     {"mountpoint":"/var/cache/pacman/pkg","name":"@pkg"} ],
+          "dev_path": null, "flags": [], "fs_type": "btrfs",
+          "mount_options": ["compress=zstd"], "mountpoint": null,
+          "obj_id": "8c2c2b92-1070-455d-b76a-56263bab24aa",
+          "size":  { "sector_size": {"unit":"B","value":512}, "unit":"B", "value": $mz },
+          "start": { "sector_size": {"unit":"B","value":512}, "unit":"B", "value": $ms },
+          "status": "create", "type": "primary" }
+      ] } ]
+  },
+  "hostname": $host, "kernels": ["linux"], "network_config": {"type":"iso"},
+  "ntp": true, "parallel_downloads": 8, "script": null, "services": [], "swap": true,
+  "timezone": $tz,
+  "locale_config": { "kb_layout": "us", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+  "mirror_config": { "custom_repositories": [],
+    "custom_servers": [ {"url":"https://mirror.omarchy.org/$repo/os/$arch"},
+                        {"url":"https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+                        {"url":"https://geo.mirror.pkgbuild.com/$repo/os/$arch"} ],
+    "mirror_regions": {}, "optional_repositories": [] },
+  "packages": ["base-devel","git","omarchy-keyring",$settings,$runtime],
+  "profile_config": { "gfx_driver": null, "greeter": null, "profile": {} },
+  "version": "3.0.9"
+}' >"$SEED/user_configuration.json"
+
+xorrisofs -quiet -V CIDATA -J -r -o "$WORK/cidata.iso" "$SEED"
+
+# Tear the old machine down BEFORE putting anything in the pool, and delete only
+# this machine's own disk.
+#
+# `undefine --remove-all-storage` is the obvious call and it is wrong here: it
+# removes every volume attached to the domain, and two of the three are the
+# read-only cdroms, the installer ISO and the cidata drive. The ISO is shared
+# with the other bench machine, so rebuilding machine 1 deletes the ISO that
+# machine 1 is about to boot from, and virt-install then fails with "Size must
+# be specified for non existent volume".
+if sudo virsh dominfo "$VM" &>/dev/null; then
+  sudo virsh destroy "$VM" &>/dev/null || true
+  sudo virsh undefine "$VM" --nvram &>/dev/null || true
+fi
+sudo rm -f "$POOL/$VM.qcow2"
+
+sudo cp "$WORK/cidata.iso" "$POOL/omarchy-fleet-cidata$N.iso"
+sudo chmod 644 "$POOL/omarchy-fleet-cidata$N.iso"
+[[ -f $POOL/$(basename "$ISO") ]] || sudo cp "$ISO" "$POOL/"
+sudo chmod 644 "$POOL/$(basename "$ISO")"
+
+# The VNC protocol truncates a password at 8 characters, so generating a longer
+# one produces a connection file that silently disagrees with the server.
+#
+# Ending this pipeline in `cut` rather than `head` is deliberate: head closes the
+# pipe as soon as it has its bytes, the writer takes SIGPIPE, and under
+# `set -o pipefail` that kills the script here with no output at all. cut reads
+# its input to the end.
+mkdir -p "$CONF_DIR"
+VNC_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-8)
+
+# Boot order is hd,cdrom on purpose: the empty disk has no EFI loader so the
+# firmware falls through to the installer now, and boots the installed system
+# once there is one. No need to eject the ISO afterwards.
+#
+# The guest agent channel is worth the one line. Without it `virsh domifaddr`
+# cannot answer and finding a machine's address means reading DHCP leases and
+# matching them against the domain's MAC by hand.
+sudo virt-install \
+  --name "$VM" \
+  --memory "$RAM_MIB" --vcpus "$VCPUS" --cpu host-passthrough \
+  --machine q35 --boot uefi \
+  --disk "path=$POOL/$VM.qcow2,size=$DISK_GIB,format=qcow2,bus=virtio" \
+  --disk "path=$POOL/$(basename "$ISO"),device=cdrom,readonly=on" \
+  --disk "path=$POOL/omarchy-fleet-cidata$N.iso,device=cdrom,readonly=on" \
+  --network network=default,model=virtio \
+  --graphics "vnc,port=$VNC_PORT,listen=127.0.0.1,password=$VNC_PASSWORD" \
+  --video virtio \
+  --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
+  --osinfo archlinux \
+  --noautoconsole --import
+
+# The VNC server listens on 127.0.0.1 only, so a viewer window on this host is
+# the whole of the access path. The connection file carries the password and is
+# chmod 600 for that reason.
+umask 077
+cat >"$CONF_DIR/test$N.vv" <<EOF
+[virt-viewer]
+type=vnc
+host=127.0.0.1
+port=$VNC_PORT
+password=$VNC_PASSWORD
+title=$VM
+fullscreen=0
+EOF
+
+echo "$VM installing from $(basename "$ISO"). Roughly ten minutes from cold."
+echo "  watch:  sudo virsh domifaddr $VM --source agent"
+echo "  view:   bin/omarchy-fleet-vm-view $N"
+echo "  log in: $GUEST_USER / $GUEST_PASSWORD"

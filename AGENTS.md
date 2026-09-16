@@ -78,6 +78,24 @@ This has been run once, on 2026-09-15, and it works. Three things learned doing 
 
 **A machine installed from one of these ISOs is only valid until it updates.** The fleet code ships inside `omarchy-dev`, which is the name upstream publishes on its edge channel, and the installed system points there. The package version is a commit count, so this build loses to upstream's whenever upstream's development branch is ahead of the branch point. Two machines were updated on 2026-09-15 and one `pacman -Syu` replaced the runtime package and removed every fleet command, the menu entry and the install leaf with no warning. Check `pacman -Q omarchy-dev` on a test machine before trusting a result from it.
 
+## Bench machines
+
+`bin/omarchy-fleet-vm-make` builds a persistent libvirt machine, installed unattended from a locally built ISO, and `bin/omarchy-fleet-vm-view` opens a viewer for each on a chosen Hyprland output.
+
+They exist because none of the three routes already here leaves a machine behind. `bin/omarchy-iso-boot` boots an ISO in a throwaway QEMU process, `bin/omarchy-iso-test` drives the interactive install through OCR and keystrokes, and `test/integration` installs once and boots throwaway overlays of that base image. Checking that a menu entry appears only on an enrolled machine, or that a factory reset does what it claims, needs machines that survive a reboot and can be compared side by side.
+
+```bash
+bin/omarchy-fleet-vm-make 1
+bin/omarchy-fleet-vm-make 2
+OMARCHY_FLEET_VM_OUTPUT=<output> bin/omarchy-fleet-vm-view
+```
+
+The guest user and password match `GUEST_USER` and `GUEST_PASSWORD` in the integration harness, so a machine from either route is reached the same way.
+
+**One duplication is deliberate and has to be kept in step.** `build_cidata` in `test/integration.d/base-test.sh` writes the same autoinstall drive and is the copy to follow. That function is welded to the harness it lives in and cannot be sourced from outside it, so the partition arithmetic exists twice. If one changes, change the other.
+
+Each script carries what it cost to learn in its own header, including why the teardown does not use `undefine --remove-all-storage`, why a viewer is placed by focusing an output rather than moving a window, and why a window on the wrong output shows a remote watcher nothing. Read the header before changing either one.
+
 ## Repository settings that are deliberate
 
 Upstream's nightly ISO build workflow is disabled here. It would otherwise build a full ISO unattended every night in a repository nobody is watching. Re-enable it only if someone is going to read the results.
