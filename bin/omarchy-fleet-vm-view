@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# Open a viewer window for each bench machine, on a chosen Hyprland output.
+#
+#   bin/omarchy-fleet-vm-view                                  # both
+#   bin/omarchy-fleet-vm-view 1                                # just machine 1
+#   OMARCHY_FLEET_VM_OUTPUT=headless-1 bin/omarchy-fleet-vm-view
+#
+# The output matters whenever the session is being watched remotely. A window
+# placed on the physical panel is invisible to anyone connected to a virtual
+# output, so a demonstration can be running perfectly and showing nobody
+# anything. Name the output the audience is actually looking at.
+#
+# A new window opens on whichever output has focus, so this focuses the wanted
+# one and lets placement follow, rather than moving each window afterwards.
+# Moving them is the obvious approach and does not work on current Hyprland:
+# dispatch arguments are Lua now, so the documented
+# `movetoworkspacesilent <ws>,address:<addr>` string is a syntax error, and the
+# Lua dispatcher table exposes no by-address form. Nothing here writes to any
+# Hyprland configuration, and the focus change lasts until the next click.
+#
+# The VNC servers listen on 127.0.0.1 only, so these windows are the whole of
+# the access path. The connection files carry the VNC password and are chmod 600
+# for that reason; omarchy-fleet-vm-make writes them.
+
+set -euo pipefail
+
+CONF_DIR="$HOME/.local/share/omarchy-fleet-vm"
+OUTPUT=${OMARCHY_FLEET_VM_OUTPUT:-}
+
+if [[ -n $OUTPUT ]]; then
+  hyprctl -j monitors | jq -e --arg o "$OUTPUT" 'any(.[]; .name == $o)' >/dev/null \
+    || { echo "no output named $OUTPUT" >&2; exit 1; }
+  hyprctl dispatch "hl.dsp.focus({ monitor = \"$OUTPUT\" })" >/dev/null
+fi
+
+# Not `for N in "${@:-1 2}"`: quoted, that default is a single word "1 2" rather
+# than two arguments, so the no-argument form silently looks for one machine
+# called "1 2".
+if (( $# > 0 )); then
+  TARGETS=("$@")
+else
+  TARGETS=(1 2)
+fi
+
+for N in "${TARGETS[@]}"; do
+  vv="$CONF_DIR/test$N.vv"
+  [[ -f $vv ]] || { echo "no connection file at $vv; run omarchy-fleet-vm-make $N" >&2; exit 1; }
+  VM="omarchy-fleet-test$N"
+
+  if ! sudo virsh domstate "$VM" 2>/dev/null | grep -q running; then
+    echo "$VM is not running; starting it" >&2
+    sudo virsh start "$VM" >/dev/null
+  fi
+
+  if hyprctl -j clients | jq -e --arg t "$VM" 'any(.[]; .class == "remote-viewer" and (.title | startswith($t)))' >/dev/null; then
+    echo "$VM already has a viewer open"
+    continue
+  fi
+
+  setsid nohup remote-viewer "$vv" >/dev/null 2>&1 </dev/null &
+  disown
+
+  # Wait for the window rather than sleeping a fixed time: remote-viewer is slow
+  # to map its window on a cold start and instant on a warm one.
+  placed=""
+  for _ in {1..40}; do
+    sleep 0.5
+    placed=$(hyprctl -j clients | jq -r --arg t "$VM" \
+      '[.[] | select(.class == "remote-viewer") | select(.title | startswith($t))
+        | "monitor " + (.monitor|tostring) + " workspace " + (.workspace.id|tostring)] | first // ""')
+    [[ -n $placed ]] && break
+  done
+
+  if [[ -n $placed ]]; then
+    echo "$VM: viewer on $placed"
+  else
+    echo "$VM: viewer did not appear within 20s" >&2
+  fi
+done
+
+# One more thing that will confuse you before it teaches you: remote-viewer
+# resizes the guest display to fit its own window, so a small window gives the
+# guest a small screen and tall menus overflow it. Enlarge the window rather
+# than setting a mode inside the guest.
