@@ -13,4 +13,7 @@ for test in "$ROOT"/test/unit/*-test.sh; do
 done
 
 printf '==> test/unit/test_*.py\n'
-python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"
+# The start directory is also the top level. With the repository root as top
+# level the modules are named test.unit.*, and a Python that ships the standard
+# library's own `test` package (Ubuntu, GitHub's runners) imports that instead.
+python3 -m unittest discover -s "$ROOT/test/unit"
