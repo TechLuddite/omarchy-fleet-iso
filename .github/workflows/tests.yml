@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The fast, VM-free suite in test/unit, through ./test/all. The integration
+  # scenarios in test/integration.d boot the ISO in QEMU and are not run here.
+  #
+  # The job runs on the runner itself and not in a container, for three
+  # reasons: the copy-failure case in cidata-load-test.sh needs a non-root
+  # user, the keyboard tests call localectl, which needs a booted systemd, and
+  # the partition test needs parted. Python 3.14 matches Arch. Under 3.12 the
+  # unittest discovery in test/all resolves `test` to the standard library
+  # package and imports nothing.
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Install parted for the partition numbering test
+        run: sudo apt-get install -y --no-install-recommends parted
+      - run: ./test/all
+
+  # Luddite Scout reads the checkout: agent instruction files, hidden Unicode,
+  # Actions, dependencies and build-time code. It runs nothing from this
+  # repository. Fails on any HIGH or MEDIUM finding and on a check that could
+  # not finish.
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: TechLuddite/luddite-scout-action@b34b6a811b70e99c51a8e9b1f4a1aeecc786d99d
+        with:
+          fail-on: medium
+          name: ${{ github.repository }}
+          commit: ${{ github.event.pull_request.head.sha || github.sha }}
