@@ -11,10 +11,10 @@ jobs:
   # The fast, VM-free suite in test/unit, through ./test/all. The integration
   # scenarios in test/integration.d boot the ISO in QEMU and are not run here.
   #
-  # The job runs on the runner itself and not in a container, for three
-  # reasons: the copy-failure case in cidata-load-test.sh needs a non-root
-  # user, the keyboard tests call localectl, which needs a booted systemd, and
-  # the partition test needs parted. Python 3.14 matches Arch.
+  # The job runs on the runner itself and not in a container: the copy-failure
+  # case in cidata-load-test.sh needs a non-root user. Python 3.14 matches
+  # Arch. The three keyboard tests skip here, because `localectl list-keymaps`
+  # fails on Ubuntu, and run on any Arch machine.
   unit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -25,10 +25,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
-      # console-data supplies /usr/share/keymaps, which Ubuntu leaves out and
-      # `localectl list-keymaps` reads.
-      - name: Install parted and the console keymaps
-        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends parted console-data
+      - name: Install parted for the partition numbering test
+        run: sudo apt-get install -y --no-install-recommends parted
       - run: ./test/all
 
   # Luddite Scout reads the checkout: agent instruction files, hidden Unicode,

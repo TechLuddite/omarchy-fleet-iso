@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,19 @@ def supported_keymaps():
 SUPPORTED_KEYMAPS = supported_keymaps()
 
 
+def localectl_lists_keymaps():
+    try:
+        return subprocess.run(
+            ["localectl", "--no-pager", "list-keymaps"], capture_output=True
+        ).returncode == 0
+    except OSError:
+        return False
+
+
+# configure_keyboard asks localectl for the known keymaps. That call fails
+# where systemd is not PID 1 (a container) and on Debian and Ubuntu, which ship
+# no keymap list for it, so GitHub's runners skip this class. Arch runs it.
+@unittest.skipUnless(localectl_lists_keymaps(), "localectl cannot list keymaps here")
 class KeyboardConfigurationTest(unittest.TestCase):
     def target(self, directory: str) -> Path:
         target = Path(directory)
