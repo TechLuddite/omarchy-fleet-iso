@@ -25,8 +25,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
-      - name: Install parted for the partition numbering test
-        run: sudo apt-get install -y --no-install-recommends parted
+      # console-data supplies /usr/share/keymaps, which Ubuntu leaves out and
+      # `localectl list-keymaps` reads.
+      - name: Install parted and the console keymaps
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends parted console-data
       - run: ./test/all
 
   # Luddite Scout reads the checkout: agent instruction files, hidden Unicode,
